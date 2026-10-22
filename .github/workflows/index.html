@@ -59,4 +59,409 @@
     .foot{text-align:center;color:var(--muted);font-size:12px;margin-top:20px}
     .file-label{display:inline-flex;align-items:center}
     @media(max-width:700px){.wrap{padding:18px 12px 40px}.toolbar{grid-template-columns:1fr 1fr}.toolbar input{grid-column:1/-1}.grid{grid-template-columns:1fr}.field.full{grid-column:auto}.panel{padding:14px}.item{padding:12px}.item-side{flex-direction:column}.header-actions .btn{padding:8px 9px;font-size:13px}}
-    @media(max-width:420px){header{align-items:flex-start}.sub{max-width:190px}.logo{width:40px;height:40px}.item{gap:9px}.site-icon{widt
+    @media(max-width:420px){header{align-items:flex-start}.sub{max-width:190px}.logo{width:40px;height:40px}.item{gap:9px}.site-icon{width:34px;height:34px;flex-basis:34px}.item-side{max-width:78px}.item-side .btn{font-size:11px;padding:5px 6px}}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <div class="brand">
+        <div class="logo" aria-hidden="true">↗</div>
+        <div><h1>我的收藏夹</h1><div class="sub">把有用的网页收好，随时再看</div></div>
+      </div>
+      <div class="header-actions">
+        <button class="btn" id="exportBtn" type="button">导出备份</button>
+        <label class="btn file-label" for="importFile">导入备份</label>
+        <input id="importFile" class="hidden" type="file" accept="application/json,.json">
+      </div>
+    </header>
+
+    <section class="panel" aria-labelledby="formTitle">
+      <h2 id="formTitle">＋ 添加新收藏</h2>
+      <form id="addForm">
+        <div class="grid">
+          <div class="field full">
+            <label for="urlInput">网页链接（必填）</label>
+            <input id="urlInput" type="text" inputmode="url" placeholder="例如：https://example.com" autocomplete="url" required>
+          </div>
+          <div class="field">
+            <label for="titleInput">标题（可选）</label>
+            <input id="titleInput" type="text" maxlength="180" placeholder="留空时使用网站域名">
+          </div>
+          <div class="field">
+            <label for="tagsInput">标签（可选，用逗号分隔）</label>
+            <input id="tagsInput" type="text" placeholder="学习, 工具, 灵感">
+          </div>
+          <div class="field full">
+            <label for="noteInput">备注（可选）</label>
+            <textarea id="noteInput" maxlength="1500" placeholder="记下这个链接有什么用……"></textarea>
+          </div>
+        </div>
+        <div class="form-actions"><button class="btn" id="resetBtn" type="reset">清空</button><button class="btn primary" id="saveBtn" type="submit">＋ 保存链接</button></div>
+      </form>
+    </section>
+
+    <section aria-label="收藏列表">
+      <div class="toolbar">
+        <input id="searchInput" type="search" placeholder="搜索标题、网址、标签或备注…" aria-label="搜索收藏">
+        <select id="tagFilter" aria-label="按标签筛选"><option value="">全部标签</option></select>
+        <select id="statusFilter" aria-label="按状态筛选">
+          <option value="all">全部状态</option><option value="unread">未读</option><option value="read">已读</option><option value="starred">星标</option>
+        </select>
+        <select id="sortSelect" aria-label="排序方式"><option value="newest">最近添加</option><option value="oldest">最早添加</option><option value="title">标题 A-Z</option></select>
+      </div>
+      <div class="stats"><span>共 <strong id="totalCount">0</strong> 条</span><span>当前显示 <strong id="visibleCount">0</strong> 条</span></div>
+      <div id="linkList" class="list"></div>
+      <div id="emptyState" class="empty hidden"><div class="emoji">🔖</div><strong id="emptyTitle">还没有收藏</strong><div id="emptyText">把喜欢的网页链接添加进来吧。</div></div>
+    </section>
+    <div class="foot">数据保存在当前浏览器中。更换设备或清理浏览器数据前，请先导出备份。</div>
+  </main>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+
+const DB_NAME = "my-link-vault-db";
+const DB_VERSION = 1;
+const STORE_NAME = "links";
+let db = null;
+let toastTimer = null;
+const $ = (id) => document.getElementById(id);
+
+function showToast(message) {
+  const el = $("toast");
+  el.textContent = message;
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 2600);
+}
+
+function transactionDone(tx) {
+  return new Promise((resolve, reject) => {
+    tx.addEventListener("complete", () => resolve(), { once: true });
+    tx.addEventListener("error", () => reject(tx.error || new Error("数据库事务失败")), { once: true });
+    tx.addEventListener("abort", () => reject(tx.error || new Error("数据库事务已取消")), { once: true });
+  });
+}
+
+function openDatabase() {
+  return new Promise((resolve, reject) => {
+    if (!("indexedDB" in window)) {
+      reject(new Error("当前浏览器不支持本地数据库，请使用新版 Chrome、Edge 或 Safari。"));
+      return;
+    }
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(STORE_NAME)) {
+        const store = database.createObjectStore(STORE_NAME, { keyPath: "id" });
+        store.createIndex("createdAt", "createdAt", { unique: false });
+      }
+    };
+    request.onsuccess = () => {
+      db = request.result;
+      db.onversionchange = () => { db.close(); db = null; };
+      resolve(db);
+    };
+    request.onerror = () => reject(request.error || new Error("无法打开本地数据库"));
+    request.onblocked = () => reject(new Error("数据库正在被另一个页面占用，请关闭其他收藏夹页面后重试。"));
+  });
+}
+
+async function getAllLinks() {
+  if (!db) throw new Error("数据库尚未准备好，请刷新页面后重试。");
+  const tx = db.transaction(STORE_NAME, "readonly");
+  // 必须在创建事务后立刻监听 complete，不能等请求成功后再监听。
+  const done = transactionDone(tx);
+  const request = tx.objectStore(STORE_NAME).getAll();
+  const result = await new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error || new Error("读取收藏失败"));
+  });
+  await done;
+  return result;
+}
+
+async function putLink(link) {
+  if (!db) throw new Error("数据库尚未准备好，请刷新页面后重试。");
+  const tx = db.transaction(STORE_NAME, "readwrite");
+  const done = transactionDone(tx);
+  tx.objectStore(STORE_NAME).put(link);
+  await done;
+}
+
+async function deleteLink(id) {
+  const tx = db.transaction(STORE_NAME, "readwrite");
+  const done = transactionDone(tx);
+  tx.objectStore(STORE_NAME).delete(id);
+  await done;
+}
+
+function normalizeUrl(raw) {
+  let value = raw.trim();
+  if (!value) throw new Error("请先输入网页链接。");
+  if (!/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(value)) value = "https://" + value;
+  let url;
+  try { url = new URL(value); } catch { throw new Error("链接格式不正确，请检查后再试。"); }
+  if (!["http:", "https:"].includes(url.protocol)) throw new Error("目前只支持 http 或 https 网页链接。");
+  return url.href;
+}
+
+function getDomain(url) {
+  try { return new URL(url).hostname.replace(/^www\./i, "") || url; }
+  catch { return url; }
+}
+
+function parseTags(raw) {
+  return [...new Set(raw.split(/[,，、;；]/).map(s => s.trim()).filter(Boolean))].slice(0, 20);
+}
+
+function escapeText(value) {
+  return String(value ?? "");
+}
+
+async function refresh() {
+  const all = await getAllLinks();
+  const tagSelect = $("tagFilter");
+  const previousTag = tagSelect.value;
+  const tags = [...new Set(all.flatMap(item => Array.isArray(item.tags) ? item.tags : []))].sort((a,b) => a.localeCompare(b, "zh-CN"));
+  tagSelect.replaceChildren(new Option("全部标签", ""));
+  for (const tag of tags) tagSelect.add(new Option(tag, tag));
+  if (tags.includes(previousTag)) tagSelect.value = previousTag;
+
+  const query = $("searchInput").value.trim().toLocaleLowerCase();
+  const selectedTag = tagSelect.value;
+  const status = $("statusFilter").value;
+  const sort = $("sortSelect").value;
+  let filtered = all.filter(item => {
+    const itemTags = Array.isArray(item.tags) ? item.tags : [];
+    const haystack = [item.title, item.url, item.siteName, item.note, ...itemTags].join(" ").toLocaleLowerCase();
+    if (query && !haystack.includes(query)) return false;
+    if (selectedTag && !itemTags.includes(selectedTag)) return false;
+    if (status === "unread" && item.read) return false;
+    if (status === "read" && !item.read) return false;
+    if (status === "starred" && !item.starred) return false;
+    return true;
+  });
+  filtered.sort((a,b) => {
+    if (sort === "oldest") return (a.createdAt || 0) - (b.createdAt || 0);
+    if (sort === "title") return String(a.title || "").localeCompare(String(b.title || ""), "zh-CN");
+    return (b.createdAt || 0) - (a.createdAt || 0);
+  });
+
+  $("totalCount").textContent = String(all.length);
+  $("visibleCount").textContent = String(filtered.length);
+  const list = $("linkList");
+  list.replaceChildren();
+  for (const item of filtered) list.appendChild(createLinkCard(item));
+  $("emptyState").classList.toggle("hidden", filtered.length !== 0);
+  if (!all.length) {
+    $("emptyTitle").textContent = "还没有收藏";
+    $("emptyText").textContent = "把喜欢的网页链接添加进来吧。";
+  } else {
+    $("emptyTitle").textContent = "没有找到匹配的收藏";
+    $("emptyText").textContent = "试试修改搜索词或筛选条件。";
+  }
+}
+
+function createLinkCard(item) {
+  const card = document.createElement("article");
+  card.className = "item";
+  const icon = document.createElement("div");
+  icon.className = "site-icon";
+  icon.textContent = (String(item.title || item.siteName || "链").trim()[0] || "链").toUpperCase();
+  icon.setAttribute("aria-hidden", "true");
+
+  const main = document.createElement("div");
+  main.className = "item-main";
+  const title = document.createElement("a");
+  title.className = "item-title";
+  title.href = item.url;
+  title.target = "_blank";
+  title.rel = "noopener noreferrer";
+  title.textContent = item.title || getDomain(item.url);
+  title.title = item.title || item.url;
+  const url = document.createElement("div");
+  url.className = "url";
+  url.textContent = item.url;
+  main.append(title, url);
+
+  if (item.note) {
+    const note = document.createElement("div");
+    note.className = "note";
+    note.textContent = item.note;
+    main.appendChild(note);
+  }
+  const chips = document.createElement("div");
+  chips.className = "chips";
+  if (item.starred) {
+    const star = document.createElement("span"); star.className = "chip"; star.textContent = "★ 星标"; chips.appendChild(star);
+  }
+  const state = document.createElement("span");
+  state.className = "chip" + (item.read ? " read" : "");
+  state.textContent = item.read ? "已读" : "未读";
+  chips.appendChild(state);
+  for (const tag of (Array.isArray(item.tags) ? item.tags : [])) {
+    const chip = document.createElement("span"); chip.className = "chip"; chip.textContent = "#" + tag; chips.appendChild(chip);
+  }
+  main.appendChild(chips);
+
+  const actions = document.createElement("div");
+  actions.className = "item-side";
+  const starBtn = makeActionButton(item.starred ? "★ 已星标" : "☆ 星标", async () => {
+    item.starred = !item.starred; await putLink(item); await refresh();
+  });
+  const readBtn = makeActionButton(item.read ? "标为未读" : "标为已读", async () => {
+    item.read = !item.read; await putLink(item); await refresh();
+  });
+  const editBtn = makeActionButton("编辑", () => editLink(item));
+  const deleteBtn = makeActionButton("删除", async () => {
+    if (!confirm("确定删除这条收藏吗？")) return;
+    await deleteLink(item.id); await refresh(); showToast("已删除");
+  });
+  deleteBtn.classList.add("danger");
+  actions.append(starBtn, readBtn, editBtn, deleteBtn);
+  card.append(icon, main, actions);
+  return card;
+}
+
+function makeActionButton(label, action) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "btn small";
+  btn.textContent = label;
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    try { await action(); }
+    catch (error) { showToast(error.message || "操作失败"); }
+    finally { btn.disabled = false; }
+  });
+  return btn;
+}
+
+async function editLink(item) {
+  const title = prompt("修改标题：", item.title || "");
+  if (title === null) return;
+  const note = prompt("修改备注（可留空）：", item.note || "");
+  if (note === null) return;
+  const tags = prompt("修改标签，用逗号分隔：", (item.tags || []).join(", "));
+  if (tags === null) return;
+  item.title = title.trim() || getDomain(item.url);
+  item.note = note.trim();
+  item.tags = parseTags(tags);
+  await putLink(item);
+  await refresh();
+  showToast("已更新收藏");
+}
+
+$("addForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const button = $("saveBtn");
+  if (button.disabled) return;
+  button.disabled = true;
+  button.textContent = "正在保存…";
+  try {
+    const url = normalizeUrl($("urlInput").value);
+    const domain = getDomain(url);
+    const manualTitle = $("titleInput").value.trim();
+    const link = {
+      id: (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)),
+      url,
+      title: manualTitle || domain,
+      siteName: domain,
+      tags: parseTags($("tagsInput").value),
+      note: $("noteInput").value.trim(),
+      createdAt: Date.now(),
+      read: false,
+      starred: false
+    };
+
+    // 先写入数据库；保存成功后再清空筛选并刷新，避免抓取网页信息拖慢保存。
+    await putLink(link);
+    $("addForm").reset();
+    $("searchInput").value = "";
+    $("tagFilter").value = "";
+    $("statusFilter").value = "all";
+    $("sortSelect").value = "newest";
+    await refresh();
+    showToast("保存成功！");
+  } catch (error) {
+    showToast(error.message || "保存失败，请检查浏览器存储权限");
+  } finally {
+    button.disabled = false;
+    button.textContent = "＋ 保存链接";
+  }
+});
+
+$("searchInput").addEventListener("input", () => refresh().catch(e => showToast(e.message)));
+$("tagFilter").addEventListener("change", () => refresh().catch(e => showToast(e.message)));
+$("statusFilter").addEventListener("change", () => refresh().catch(e => showToast(e.message)));
+$("sortSelect").addEventListener("change", () => refresh().catch(e => showToast(e.message)));
+
+$("exportBtn").addEventListener("click", async () => {
+  try {
+    const all = await getAllLinks();
+    const blob = new Blob([JSON.stringify({ app: "我的收藏夹", version: 1, exportedAt: new Date().toISOString(), links: all }, null, 2)], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "我的收藏夹备份-" + new Date().toISOString().slice(0,10) + ".json";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showToast("备份文件已导出");
+  } catch (error) { showToast(error.message || "导出失败"); }
+});
+
+$("importFile").addEventListener("change", async event => {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+  try {
+    const parsed = JSON.parse(await file.text());
+    const rows = Array.isArray(parsed) ? parsed : parsed.links;
+    if (!Array.isArray(rows)) throw new Error("备份文件格式不正确。");
+    let count = 0;
+    for (const raw of rows) {
+      if (!raw || typeof raw.url !== "string") continue;
+      let url;
+      try { url = normalizeUrl(raw.url); } catch { continue; }
+      const id = typeof raw.id === "string" && raw.id ? raw.id : (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+      await putLink({
+        id, url,
+        title: String(raw.title || getDomain(url)).slice(0,180),
+        siteName: String(raw.siteName || getDomain(url)),
+        tags: Array.isArray(raw.tags) ? raw.tags.map(String).slice(0,20) : [],
+        note: String(raw.note || "").slice(0,1500),
+        createdAt: Number(raw.createdAt) || Date.now(),
+        read: Boolean(raw.read), starred: Boolean(raw.starred)
+      });
+      count++;
+    }
+    $("searchInput").value = "";
+    $("tagFilter").value = "";
+    $("statusFilter").value = "all";
+    await refresh();
+    showToast("导入完成，共处理 " + count + " 条");
+  } catch (error) {
+    showToast(error.message || "导入失败，文件可能已损坏");
+  } finally {
+    event.target.value = "";
+  }
+});
+
+(async function init() {
+  try {
+    await openDatabase();
+    await refresh();
+    if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+      navigator.serviceWorker.register("./sw.js").catch(() => {});
+    }
+  } catch (error) {
+    showToast(error.message || "初始化失败，请刷新页面重试");
+    $("emptyTitle").textContent = "收藏夹启动失败";
+    $("emptyText").textContent = error.message || "请确认浏览器支持 IndexedDB。";
+    $("emptyState").classList.remove("hidden");
+  }
+})();
+</script>
+</body>
+</html>
